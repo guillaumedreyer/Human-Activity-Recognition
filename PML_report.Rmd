@@ -1,0 +1,363 @@
+---
+title: "Human Activity Recognition"
+author: "Guillaume Dreyer"
+date: "April 23, 2015"
+output: html_document
+---
+
+
+
+## Analysis description.
+
+We study the *Weight Lifting Exercises* dataset (http://groupware.les.inf.puc-rio.br/har#ixzz3YBmEva2B). This data set displays five classes and 159 variables. Briefly, six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (*class* 'A'), throwing the elbows to the front (*class* 'B'), lifting the dumbbell only halfway (*class* 'C'), lowering the dumbbell only halfway (*class* 'D') and throwing the hips to the front (*class* 'E').
+
+Based on some of the 159 predictors of this data set, we construct a decision tree that determines the class of each instance.
+
+
+```{r, echo=FALSE, message=FALSE}
+library(caret)
+library(ggplot2)
+library(gridExtra)
+library(randomForest)
+```
+
+
+## Data preparation.
+
+### Loading the data, and splitting them into training and testing data sets. 
+
+```{r echo=FALSE,cache=TRUE}
+pml_training <- read.csv('pml-training.csv')
+pml_training <- pml_training[c(160, 1:159)]
+factor_variables <- names(pml_training[sapply(pml_training, is.factor)])
+numeric_variables <- names(pml_training[!sapply(pml_training, is.factor)]) 
+pml_training <- pml_training[c(factor_variables, numeric_variables)]
+```
+
+We begin with loading the data and storing them in the data frame *pml_training*.
+
+```{r}
+dim(pml_training);
+```
+
+We then split *pml_training* into a *training* data set and a *testing* data set. 
+
+```{r,echo=FALSE}
+set.seed(125)
+inTrain <- createDataPartition(y = pml_training$classe, p = 0.7,list = FALSE)
+training <- pml_training[inTrain, ]
+testing <- pml_training[-inTrain, ]
+```
+
+```{r}
+dim(training); head(training[1:5])
+dim(testing); head(testing[1:5])
+```
+
+### Cleaning and feature selection.
+
+As shown above, the *WLE data set* contains multiple variables with no values or very few measurements. We will ignore these features. Also, there are three variables, *cvtd_timestamp*, *raw_timestamp_part_1*, *raw_timestamp_part_2*, that indicate the time at which measurements are done. However, each series of measurements is taken over a 2 min time period, and the time variables are displayed in minutes, not in seconds. We will thus disregard these time variables as well. Similarly, one observes that the integer variables *num_window*, *new_window*, *X* are closely related to the row indexing, thus should be disregarded as well.
+
+In fine, we shall keep 54 out of 159 predictors of the orginal data set *pml_training* to build our machine learning algorithm.
+
+```{r, echo=FALSE, cache=TRUE}
+final_variable_index <- c(1,2,42,  43,  44,  45 , 62 , 63 , 64 , 65 , 66 , 67 , 68 , 69 , 70 , 71 , 72 , 73 , 74 , 85,86, 87 , 88 , 89,  90 , 91,  92,  93 ,103, 104, 105, 112, 123, 124, 125, 126, 127, 128, 129, 130,131, 132, 133, 134, 141, 152, 153, 154, 155, 156, 157, 158, 159, 160)
+training <- training[final_variable_index]
+testing <- testing[final_variable_index]
+```
+
+```{r}
+names(training)
+```
+
+
+## Data preprocessing and exploration.
+
+### Some graphs...
+
+It is important to make sure that our training set *training* is balanced. In particular, we want a comparable amount of data for each user.
+
+```{r,echo=FALSE, cache=TRUE}
+p1 <- qplot(training$classe,data=training, colour=user_name,  geom = 'histogram')
+p2 <- qplot(training$classe,data=training, colour=user_name,  geom = 'density')
+```
+
+```{r}
+grid.arrange(p1,p2, ncol=2)
+```
+
+The above graphs show that the proportion of data per *class* and *user_name* in the training set is homogeneous. However, accross users, more measurements has been recorded for the *class* 'A'.
+
+
+
+### Principal Component Analysis.
+
+With a total of 53 predictors, we may want to use **principal component analysis** to reduce the number of variables, especially in order to do some data exploration. 
+
+```{r, echo=FALSE, cache=TRUE}
+preProc <- preProcess(training[,-(1:2)], method = 'pca', thresh = 0.8)
+trainPC <- predict(preProc, training[,-(1:2)])
+df_trainPC <- as.data.frame(cbind(training[,1:2], trainPC))
+
+testPC <- predict(preProc, testing[,-(1:2)])
+df_testPC <- as.data.frame(cbind(testing[,(1:2)], testPC))
+```
+
+
+```{r}
+head(df_trainPC);
+```
+
+### More graphs...
+
+```{r, echo=FALSE, cache=TRUE}
+DF_PC <- df_trainPC
+DF_PC$user_name <- training$user_name
+DF_PC$classe <- training$classe
+p3 <- qplot(PC1,PC2, data=DF_PC, colour = user_name)
+p4 <- qplot(PC1,PC2, data=DF_PC, colour = classe)
+#p3 <- featurePlot(x=DF_PC[,3:5], y=DF_PC$classe, plot='pairs')
+```
+
+Below, we plot the gragh of principal component *PC1* against principal component *PC2*.
+
+```{r}
+grid.arrange(p3,p4, ncol=2)
+```
+
+Clearly, **principal components** enable us to better visualize the data. In particular, we observe that the data corresponding to each of the six users are well clustered (left graph). However, for each user (i.e. for each cluster), distinguiching the *class* is still difficult (right graph).
+
+
+## Learning algorithm 
+
+### With PCA compression
+
+We now train a learning algorithm using the *df_trainPC* data set. We build our decision tree using **random forest**. In addition, rather than using the whole data set without differenciating users, we train our function based on each user to improve the efficiency of our algorithm.
+
+
+```{r, echo=FALSE, cache=TRUE}
+fitControl_rf <- trainControl(method = 'oob', number = 5, repeats = 1)
+fitControl_rf <- trainControl(method = 'repeatedcv', number = 5, repeats = 5)
+
+results_PC_rf_name <- list()
+modelFit_PC_rf_name <- list()
+predictions_PC_rf_name <- list()
+
+for (name in levels(df_trainPC$user_name)){
+        
+        index_name <- df_trainPC$user_name == name
+        set.seed(34536)
+        modelFit_PC_rf_name[[name]] <- train(df_trainPC[index_name, ]$classe ~.,
+                                             trControl =  fitControl_rf,
+                                             data = df_trainPC[index_name,-2],
+                                             method='rf')
+        
+        index_name <- df_testPC$user_name == name
+        predictions_PC_rf_name[[name]] <- predict(modelFit_PC_rf_name[[name]], 
+                                                  df_testPC[index_name,])
+        
+        results_PC_rf_name[[name]] <- 
+                confusionMatrix(df_testPC[index_name,]$classe,
+                                predictions_PC_rf_name[[name]])
+        }
+```
+
+Below are the **accuracy** and **confusion matrix** of our decision tree. 
+
+For each user, the first table shows the estimate for the **accuracy**, based on a **5-fold cross validation**, **repeated 5 times**. 
+
+The second table is the **confusion matrix** summarizing the performance of our algorithm on the *testing* set. As a convenience, in order to easily compare **predicted accuracy** and **actual performance**, the confusion matrix displays probalitites rather than integers.
+
+
+```{r}
+for (name in levels(df_trainPC$user_name)){
+        print(name)
+        print(round(modelFit_PC_rf_name[[name]]$results, 3))
+        print(round(100 * prop.table(results_PC_rf_name[[name]]$table,margin =1)
+                    ,digit = 1))
+        }
+```
+
+
+
+### Without PCA compression
+
+We may want to compare the above performance with that of a learning algorithm built using the *training* data set, instead of the preprocessed *df_trainPC*. We still use **random forest**. Below is the accuracy and confusion matrix of such a learning algorithm, again, for each user.
+
+
+```{r, echo=FALSE,cache=TRUE}
+fitControl_rf <- trainControl(method = 'repeatedcv', number = 10, repeats = 3)
+fitControl_rf <- trainControl(method = 'repeatedcv', number = 5, repeats = 5)
+
+results_rf_name <- list()
+modelFit_rf_name <- list()
+predictions_rf_name <- list()
+
+for (name in levels(training$user_name)){
+        
+        index_name <- training$user_name == name
+        set.seed(34536)
+        modelFit_rf_name[[name]] <- train(training[index_name, ]$classe ~ . ,
+                                          trControl =  fitControl_rf,
+                                          data=training[index_name, ], 
+                                          method='rf')
+        
+        index_name <- testing$user_name == name
+        predictions_rf_name[[name]] <- predict(modelFit_rf_name[[name]], 
+                                               newdata=testing[index_name,])
+        
+        results_rf_name[[name]] <- confusionMatrix(testing[index_name,]$classe,
+                                                   predictions_rf_name[[name]])
+        }
+```
+
+
+```{r}
+for (name in levels(df_trainPC$user_name)){
+        print(name)
+        print(round(modelFit_rf_name[[name]]$results, 3))
+        print(round(100 * prop.table(results_rf_name[[name]]$table,margin =1)
+                    ,digit = 1))
+        }
+```
+
+
+### What's better?
+
+One can see that the second algorithm performs a little better. However, the computation cost is very high. Compressing the training set using PCA improves the speed of the algorithm. However, when using principal component analysis, an essential question is the number of principal components to consider in order to obtain an acceptable balance **speed** versus **accuracy**. 
+
+
+```{r, echo=FALSE, cache=TRUE,message=FALSE}
+# preProc <- preProcess(training[,-(1:2)], method = 'pca', pcaComp = 2)
+# trainPC <- predict(preProc, training[,-(1:2)])
+# df_trainPC <- as.data.frame(cbind(training[,1:2], trainPC))
+# testPC <- predict(preProc, testing[,-(1:2)])
+# df_testPC <- as.data.frame(cbind(testing[,(1:2)], testPC))
+# 
+# #fitControl_rf <- trainControl(method = 'oob', number = 1, repeats = 1)
+# fitControl_rf <- trainControl(method = 'repeatedcv', number = 5, repeats = 5)
+# 
+# results_3PC_rf_name <- list()
+# modelFit_3PC_rf_name <- list()
+# predictions_3PC_rf_name <- list()
+# 
+# for (name in levels(df_trainPC$user_name)){
+#         
+#         index_name <- df_trainPC$user_name == name
+#         set.seed(34536)
+#         modelFit_3PC_rf_name[[name]] <- train(df_trainPC[index_name, ]$classe ~.,
+#                                               trControl =  fitControl_rf,
+#                                               data = df_trainPC[index_name,-2],
+#                                               method='rf')
+#         
+#         index_name <- df_testPC$user_name == name
+#         predictions_3PC_rf_name[[name]] <- predict(modelFit_3PC_rf_name[[name]], 
+#                                                    df_testPC[index_name,])
+#         
+#         results_3PC_rf_name[[name]] <- 
+#                 confusionMatrix(df_testPC[index_name,]$classe,
+#                                 predictions_3PC_rf_name[[name]])
+#         }
+```
+
+
+
+
+```{r, echo=FALSE, cache=TRUE}
+preProc <- preProcess(training[,-(1:2)], method = 'pca', pcaComp = 4)
+trainPC <- predict(preProc, training[,-(1:2)])
+df_trainPC <- as.data.frame(cbind(training[,1:2], trainPC))
+testPC <- predict(preProc, testing[,-(1:2)])
+df_testPC <- as.data.frame(cbind(testing[,(1:2)], testPC))
+
+# fitControl_rf <- trainControl(method = 'oob', number = 5, repeats = 1)
+fitControl_rf <- trainControl(method = 'repeatedcv', number = 5, repeats = 5)
+
+results_4PC_rf_name <- list()
+modelFit_4PC_rf_name <- list()
+predictions_4PC_rf_name <- list()
+
+for (name in levels(df_trainPC$user_name)){
+        
+        index_name <- df_trainPC$user_name == name
+        set.seed(34536)
+        modelFit_4PC_rf_name[[name]] <- train(df_trainPC[index_name, ]$classe ~.,
+                                              trControl =  fitControl_rf,
+                                              data = df_trainPC[index_name,-2],
+                                              method='rf')
+        
+        index_name <- df_testPC$user_name == name
+        predictions_4PC_rf_name[[name]] <- predict(modelFit_4PC_rf_name[[name]],
+                                                   df_testPC[index_name,])
+        
+        results_4PC_rf_name[[name]] <- 
+                confusionMatrix(df_testPC[index_name,]$classe,
+                                predictions_4PC_rf_name[[name]])
+        }
+```
+
+
+In the former case, we used 12 principal components. Such a compression does not affect much the performance of the decision tree and yields a faster algorithm than the second one. Below are the statistics for a learning algorithm obtained using only 4 principal components. The speed is greatly improved, at the expense of the accuracy...
+
+```{r}
+for (name in levels(df_trainPC$user_name)){
+        print(name)
+        print(round(modelFit_4PC_rf_name[[name]]$results, 3))
+        print(round(100 * prop.table(results_4PC_rf_name[[name]]$table,margin =1)
+                    ,digit = 1))
+        }
+```
+
+
+
+```{r, echo=FALSE, cache=TRUE}
+preProc <- preProcess(training[,-(1:2)], method = 'pca', pcaComp = 6)
+trainPC <- predict(preProc, training[,-(1:2)])
+df_trainPC <- as.data.frame(cbind(training[,1:2], trainPC))
+testPC <- predict(preProc, testing[,-(1:2)])
+df_testPC <- as.data.frame(cbind(testing[,(1:2)], testPC))
+
+# fitControl_rf <- trainControl(method = 'oob', number = 5, repeats = 1)
+fitControl_rf <- trainControl(method = 'repeatedcv', number = 5, repeats = 5)
+
+results_6PC_rf_name <- list()
+modelFit_6PC_rf_name <- list()
+predictions_6PC_rf_name <- list()
+
+for (name in levels(df_trainPC$user_name)){
+        
+        index_name <- df_trainPC$user_name == name
+        set.seed(34536)
+        modelFit_6PC_rf_name[[name]] <- train(df_trainPC[index_name, ]$classe ~.,
+                                              trControl =  fitControl_rf,
+                                              data = df_trainPC[index_name,-2],
+                                              method='rf')
+        
+        index_name <- df_testPC$user_name == name
+        predictions_6PC_rf_name[[name]] <- predict(modelFit_6PC_rf_name[[name]], 
+                                                   df_testPC[index_name,])
+        
+        results_6PC_rf_name[[name]] <- 
+                confusionMatrix(df_testPC[index_name,]$classe,
+                                predictions_6PC_rf_name[[name]])
+        }
+```
+
+
+```{r, echo=FALSE}
+# for (name in levels(df_trainPC$user_name)){
+#         print(name)
+#         print(round(modelFit_6PC_rf_name[[name]]$results, 3))
+#         print(round(100 * prop.table(results_6PC_rf_name[[name]]$table,margin =1)
+#                     ,digit = 1))
+#         }
+```
+
+
+### Reference
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+
+
+
+
