@@ -1,2 +1,2 @@
 # Human-Activity-Recognition
-Classification algorithm: based on measurements during physical exercises, we predict the activity of an user.
+Classification algorithm: based on measurements taken during physical exercises, we predict the activity of a user.
